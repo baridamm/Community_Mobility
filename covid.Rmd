@@ -1,0 +1,371 @@
+---
+title: "COVID EFFECT"
+output: rmarkdown::github_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The goal of this project is to analyze the effect of COVID-19 on communities in different countries. For this purpose we use community mobility reports data. These Community Mobility Reports aim to provide insights into what has changed in response to policies aimed at combating COVID-19. The reports chart movement trends over time by geography, across different categories of places such as retail and recreation, groceries and pharmacies, parks, transit stations, workplaces, and residential.
+
+The project utilizes unsupervised machine learning and time series analysis to analyze the data.
+
+
+Libraries
+
+```{r}
+library(dplyr)
+library(ggplot2)
+library(tidyr)
+```
+
+Importing and exploring the data
+
+```{r}
+global_df <- read.csv("~/Downloads/Global_Mobility_Report.csv")
+
+str(global_df)
+
+length(unique(global_df$date))
+length(unique(global_df$country_region))
+```
+
+The data set contains places of 135 different countries for 6 different categories over a period of almost 2 years, from 2020/2/15 to 2021/12/24.
+
+
+
+Data cleaning
+
+As there are many missing values in the data set we only use places that have more than 100 days of observation for the analysis. We prepare the data for clustering by calculating the average value of each variable for each unique place.
+
+```{r}
+global_df$date <- as.Date(global_df$date)
+
+global_df %>%
+  select(everything()) %>% 
+  summarise_all(funs(sum(is.na(.))/nrow(global_df)))
+
+```
+
+
+```{r}
+effect_df <- global_df %>% select('country_region_code', 'country_region', 'date','place_id' ,  'retail_and_recreation_percent_change_from_baseline', 'grocery_and_pharmacy_percent_change_from_baseline', 'parks_percent_change_from_baseline', 'transit_stations_percent_change_from_baseline', 'workplaces_percent_change_from_baseline', 'residential_percent_change_from_baseline' )
+
+#summarizing number of values for each column
+grouped_df <- effect_df %>% group_by(country_region, place_id) %>% summarise_all(funs(n()-sum(is.na(.))))
+
+#subseting the data to places with more than 100 observations
+filtered_df <- subset(grouped_df, grouped_df$residential_percent_change_from_baseline>100 & grouped_df$retail_and_recreation_percent_change_from_baseline>100 & grouped_df$grocery_and_pharmacy_percent_change_from_baseline>100 & grouped_df$parks_percent_change_from_baseline>100 & grouped_df$transit_stations_percent_change_from_baseline>100)
+
+#subseting the initial data frame to places with more than 100 observations
+clustering_df <- subset(effect_df, effect_df$place_id %in% filtered_df$place_id)
+
+#calculating the average of each feature for each place
+clustering_mean_df <- clustering_df %>% 
+  group_by(country_region, place_id) %>% summarise(across(retail_and_recreation_percent_change_from_baseline:residential_percent_change_from_baseline, funs(mean(.,na.rm=TRUE))))
+```
+
+Clustering
+
+For clustering we only use the average of each feature for the countries. As mentioned, only places with more than 100 days of observation are taken into consideration.
+The purpose is to find similar countries based on effects of COVID-19 on the countries economy.
+6 features are taken into consideration for each country.
+
+```{r}
+#creating a new data frame with the average value for each country
+cluster_final_df <- clustering_mean_df %>% group_by(country_region) %>% summarise(across(retail_and_recreation_percent_change_from_baseline_mean:residential_percent_change_from_baseline_mean, funs(mean(.,na.rm=TRUE))))
+
+dim(cluster_final_df)
+
+```
+
+The final data consists of 132 countries.
+
+We use k_means and hierarchical algorithms for clustering. For finding the best clustering method and number of clusters we use 2 internal validation metrics, average Silhouette width and Dunn index.
+
+```{r}
+library(factoextra)
+
+#using elbow method
+fviz_nbclust(cluster_final_df[2:7], kmeans, method = "wss")
+```
+
+The elbow method shows that the best number of clusters for the k_mean algorithm is 3. However, we will calculate both average Silhouette width and Dunn index for k from 2 to 5, and for both algorithms to find the best number of clusters.
+As all the features are on the same scale (percentage change from the baseline), there is no need to scale the data.
+
+K-mean Clustering
+```{r}
+library(ClusterR)
+library(cluster)
+library(fpc)
+set.seed(2021)
+
+k_mean_sil <- c()
+k_mean_dunn <- c()
+#k_mean clustering
+for(i in 2:5){
+  km <- kmeans(cluster_final_df[,2:7], i , nstart=20) 
+  cluster_final_df$km_class <- km$cluster
+  sil_km <- silhouette(cluster_final_df$km_class, dist(cluster_final_df[,2:7]))
+  sil_km_sum <- summary(sil_km)
+  k_mean_sil <- c(k_mean_sil,sil_km_sum$avg.width) 
+  
+  km_stats <- cluster.stats(dist(cluster_final_df[,2:7]), cluster_final_df$km_class)
+  k_mean_dunn <- c(k_mean_dunn, km_stats$dunn)
+}
+
+k_mean_sil
+k_mean_dunn
+```
+
+For the k_mean algorithm we use k=3 for the number of clusters based on internal validation metrics.
+
+Internal validation summary
+```{r}
+#average Silhouette width
+km <- kmeans(cluster_final_df[,2:7], 3 , nstart=20) 
+  cluster_final_df$km_class <- km$cluster
+  sil_km <- silhouette(cluster_final_df$km_class, dist(cluster_final_df[,2:7]))
+  sil_km_sum <- summary(sil_km)
+  fviz_silhouette(sil_km) 
+```
+
+The average silhouette with is 0.39 for the k_mean algorithm with k=3.
+This metric is calculated as follows:
+
+s(i) := (b(i) - a(i)) / max(a(i), b(i)).
+
+a(i) = average dissimilarity between i and all other points of the cluster to which i belongs
+For all other clusters C, put d(i,C) = average dissimilarity of i to all observations of C. The smallest of these d(i,C) is b(i)
+
+The average Silhouette width is the mean of all the s(i). This metric should be maximized.
+
+```{r}
+#Dunn index
+km_stats <- cluster.stats(dist(cluster_final_df[,2:7]), cluster_final_df$km_class)
+km_stats$dunn
+```
+
+The Dunn index is 0.087 Dunn index is calculated as follows:
+
+D= min.separation/max.diameter
+
+This metric should be maximized.
+
+```{r}
+#number of countries in each cluster
+sil_km_sum$clus.sizes
+```
+
+
+Scatter plots for visualizing different features of different clusters
+
+
+```{r}
+library(plotly)
+
+plot_ly(cluster_final_df, type="scatter", x=cluster_final_df$retail_and_recreation_percent_change_from_baseline_mean_mean, y=cluster_final_df$grocery_and_pharmacy_percent_change_from_baseline_mean_mean, color=factor(cluster_final_df$km_class), alpha=0.8) %>% layout(xaxis=list(title="retail and recreation percent change from baseline"), yaxis=list(title="grocery and pharmacy percent change from baseline"))
+```
+
+As shown by the scatter plot COVID_19 hasn't had a negative impact on grocery and pharmacy and retail and recreation on most of the countries in class 1. The plot shows that COVID_19 has had a minor negative impact on countries retail and recreation in class 2. Grocery and pharmacy has stayed almost the same for countries in this class. Class 3 are the countries with the most negative impacts.
+
+```{r}
+plot_ly(cluster_final_df, type="scatter", x=cluster_final_df$parks_percent_change_from_baseline_mean_mean, y=cluster_final_df$transit_stations_percent_change_from_baseline_mean_mean, color=factor(cluster_final_df$km_class), alpha=0.8) %>% layout(xaxis=list(title="parks percent change from baseline"), yaxis=list(title="transit stations percent change from baseline"))
+```
+
+This scatter plots shows that countries in class 3 have been most influenced in parks and transit station areas by COVID_19. The plot illustrates that some of the countries have seen more than 40 percent change in both areas. Unlike the last plot, countries in class 2 are clearly divided from countries in class 3. 
+
+
+Hierarchical Clustering
+
+This time we will use the hierarchical algorithm for clustering the countries
+```{r}
+set.seed(2021)
+
+hc_sil <- c()
+hc_dunn <- c()
+#hierarchical clustering
+for(i in 2:5){
+  hc <- hclust(dist(cluster_final_df[,2:7]), method="complete")
+  cluster_final_df$hc_class <- cutree(hc, i)
+  sil_hc <- silhouette(cluster_final_df$hc_class, dist(cluster_final_df[,2:7]))
+  sil_hc_sum <- summary(sil_hc)
+  hc_sil <- c(hc_sil,sil_hc_sum$avg.width) 
+  
+  hc_stats <- cluster.stats(dist(cluster_final_df[,2:7]), cluster_final_df$hc_class)
+  hc_dunn <- c(hc_dunn, hc_stats$dunn)
+}
+
+hc_sil
+hc_dunn
+
+```
+
+The metrics for 2 and 3 are really close as we used k=3 for the k_mean algorithm we will try the same to be able to compare the results better.
+
+```{r}
+#average Silhouette width
+hc <- hclust(dist(cluster_final_df[,2:7]), method="complete")
+cluster_final_df$hc_class <- cutree(hc, 3)
+sil_hc <- silhouette(cluster_final_df$hc_class, dist(cluster_final_df[,2:7]))
+fviz_silhouette(sil_hc) 
+sil_hc_sum <- summary(sil_hc)
+
+
+```
+
+When dividing the countries to 3 clusters, the hierarchical algorithm provides a cluster with only 1 observation, therefore we will divide the countries into 2 clusters.
+
+
+```{r}
+hc <- hclust(dist(cluster_final_df[,2:7]), method="complete")
+cluster_final_df$hc_class <- cutree(hc, 2)
+sil_hc <- silhouette(cluster_final_df$hc_class, dist(cluster_final_df[,2:7]))
+fviz_silhouette(sil_hc) 
+sil_hc_sum <- summary(sil_hc)
+```
+
+```{r}
+hc_stats <- cluster.stats(dist(cluster_final_df[,2:7]), cluster_final_df$hc_class)
+hc_stats$dunn
+```
+
+```{r}
+sil_hc_sum$clus.sizes
+```
+
+The hierarchical algorithm divides the countries into 2 clusters with size 78 and 54.
+
+Visualizing the dendrogram
+
+```{r}
+library(dendextend)
+
+dend <- as.dendrogram(hclust(dist(cluster_final_df[,2:7])))
+dend <- set(dend, "labels_cex", 0.5)
+labels(dend) <- cluster_final_df$country_region
+dend1 <- color_branches(dend, k=2) %>% 
+  color_labels(dend, k=2)
+plot(dend1)
+```
+
+TIME SERIES ANALYSIS
+
+We use time series analysis to understand how has COVID-19 effected different countries over time.
+The goal is to compare different countries from different clusters, look for trends in the data and forecast the values over the next month.
+
+
+```{r}
+set.seed(10)
+top_1 <- subset(cluster_final_df, cluster_final_df$km_class==1)
+sample <- as.data.frame(sample_n(top_1, 3))
+ts_1 <- subset(clustering_df, clustering_df$country_region %in% sample$country_region)
+
+
+places_1 <- unique(ts_1 %>% select("country_region", "place_id")) %>% distinct(country_region, .keep_all=TRUE)
+ts_1 <- subset(ts_1, ts_1$place_id %in% places_1$place_id)
+```
+
+
+```{r , echo = FALSE,fig.width = 9}
+ggplot(ts_1, aes(x=date, y=retail_and_recreation_percent_change_from_baseline,group=country_region, color=country_region)) + geom_line() + scale_x_date(date_breaks = "3 month") + theme(axis.text.x = element_text(angle = 60, hjust = 1), legend.title = element_blank(), ) + labs(y="retail and recreation percent change from baseline")
+```
+
+The plot illustrates retail and recreation percent change from a baseline, for 3 countries in one cluster, since the start of the pandemic. They all experienced a drastic decrease at the start of the pandemic in April of 2020. It can be seen that Iraq follows an upward trend until the end of the period. Ghana has the same trend, but with a slower increase.
+
+
+```{r}
+set.seed(1)
+top_3 <- subset(cluster_final_df, cluster_final_df$km_class==3)
+sample <- as.data.frame(sample_n(top_3, 3))
+ts_3 <- subset(clustering_df, clustering_df$country_region %in% sample$country_region)
+
+
+places_3 <- unique(ts_3 %>% select("country_region", "place_id")) %>% distinct(country_region, .keep_all=TRUE)
+ts_3 <- subset(ts_3, ts_3$place_id %in% places_3$place_id)
+```
+
+```{r , echo = FALSE,fig.width = 9}
+ggplot(ts_3, aes(x=date, y=retail_and_recreation_percent_change_from_baseline,group=country_region, color=country_region)) + geom_line() + scale_x_date(date_breaks = "3 month") + theme(axis.text.x = element_text(angle = 60, hjust = 1), legend.title = element_blank(), ) + labs(y="retail and recreation percent change from baseline")
+```
+This plot illustrates countries in cluster 2. They have the same the drastic decrease as the other class. The difference is they all mostly remain below zero until October of 2021. These countries mostly follow the same patterns.
+
+
+```{r}
+set.seed(10)
+top_2 <- subset(cluster_final_df, cluster_final_df$km_class==2)
+sample <- as.data.frame(sample_n(top_2, 3))
+ts_2 <- subset(clustering_df, clustering_df$country_region %in% sample$country_region)
+
+
+places_2 <- unique(ts_2 %>% select("country_region", "place_id")) %>% distinct(country_region, .keep_all=TRUE)
+ts_2 <- subset(ts_2, ts_2$place_id %in% places_2$place_id)
+```
+
+```{r , echo = FALSE,fig.width = 9}
+ggplot(ts_2, aes(x=date, y=retail_and_recreation_percent_change_from_baseline,group=country_region, color=country_region)) + geom_line() + scale_x_date(date_breaks = "3 month") + theme(axis.text.x = element_text(angle = 60, hjust = 1), legend.title = element_blank(), ) + labs(y="retail and recreation percent change from baseline")
+```
+The plot for countries in class 3 is different than the other classes. They only manage to go above 0 for a brief period of time. It can be seen that they have 2 high peaks.The heavy fluctuation in December and January is for the holidays.
+
+
+In the rest of the project Canada is used for the analysis.
+
+The plots below show the time series for all the categories in Canada.
+
+```{r, echo = FALSE,fig.width = 9, fig.height=20}
+canada <- subset(ts_2, ts_2$country_region=="Canada")
+
+canada %>% pivot_longer(-c(country_region_code,country_region,date,place_id), names_to = "type", values_to = "percent") %>% ggplot(aes(x=date, y=percent , group=type , color=type ))+ geom_line() + facet_wrap(~type, ncol=1, scales = "free_y")
+
+```
+
+
+```{r}
+library(xts)
+library(forecast)
+
+canada_retail <- subset(ts_2, ts_2$country_region=="Canada") %>% select("date", "retail_and_recreation_percent_change_from_baseline")
+
+canada_ts <- xts(canada_retail$retail_and_recreation_percent_change_from_baseline, canada_retail$date, start(2020,2))
+names(canada_ts) <- "retail_and_recreation_percent_change_from_baseline"
+plot(canada_ts)
+ggAcf(canada_ts, lag=120)
+```
+
+Top 10 days lowest percentage
+
+```{r}
+canada %>% select("date", "retail_and_recreation_percent_change_from_baseline") %>% arrange(retail_and_recreation_percent_change_from_baseline) %>% head(10)
+```
+
+```{r}
+canada %>% select("date", "grocery_and_pharmacy_percent_change_from_baseline") %>% arrange(grocery_and_pharmacy_percent_change_from_baseline) %>% head(10)
+```
+Comparing the result for top 10 lowest days in grocery and pharmacy in comparison to retail and recreation, it can be seen that new year's day and Christmas day are among top 3 for both. Other days are mostly in April 2020 for both categories which illustrates high COVID-19 cases in that month. 
+
+
+Time series forecasting
+
+Next we will use ARIMA model to predict the percentages for the next 30 days.
+
+```{r}
+d.arima <- auto.arima(canada_ts, seasonal=FALSE)
+d.forecast <- forecast(d.arima, h=30) 
+plot(d.forecast, include=90, xaxt = 'n') 
+axis(1, at=seq(600, 700,20) , las=2, labels=seq(as.Date('2021-10-06'), as.Date('2022-01-14') , length.out=6) )
+
+
+```
+
+
+```{r}
+library(nonlinearTseries)
+rqa.analysis=rqa(time.series = canada_ts, embedding.dim=2, time.lag=1,
+                 radius=3,lmin=1,do.plot=TRUE,distanceToBorder=2)
+
+
+```
+
+
+
